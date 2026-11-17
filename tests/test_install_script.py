@@ -54,8 +54,9 @@ class InstallScriptTest(unittest.TestCase):
             link = klipper / 'klippy' / 'extras' / 'z_calibration.py'
             self.assertTrue(link.is_symlink())
             self.assertEqual(link.resolve(), ROOT / 'z_calibration.py')
-            self.assertFalse(
-                (klipper / 'klippy' / 'extras' / 'klipper_compat.py').exists())
+            link = klipper / 'klippy' / 'extras' / 'klipper_compat.py'
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(link.resolve(), ROOT / 'klipper_compat.py')
 
     def test_links_kalico_plugin_and_cleans_old_repo_links(self):
         with tempfile.TemporaryDirectory() as tempdir:
@@ -76,9 +77,11 @@ class InstallScriptTest(unittest.TestCase):
             link = plugins / 'z_calibration.py'
             self.assertTrue(link.is_symlink())
             self.assertEqual(link.resolve(), ROOT / 'z_calibration.py')
+            link = plugins / 'klipper_compat.py'
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(link.resolve(), ROOT / 'klipper_compat.py')
             self.assertFalse((extras / 'z_calibration.py').exists())
             self.assertFalse((extras / 'klipper_compat.py').exists())
-            self.assertFalse((plugins / 'klipper_compat.py').exists())
 
     def test_uninstall_removes_only_repo_owned_python_links(self):
         with tempfile.TemporaryDirectory() as tempdir:
