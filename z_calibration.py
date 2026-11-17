@@ -51,6 +51,14 @@ class ZCalibrationHelper:
                                             above=0.)
         self.offset_margins = self._get_offset_margins(
             config, 'offset_margins', '-1.0,1.0')
+        # A bed move between the last Z homing and this calibration (the
+        # Z_TILT_ADJUST of a tilted bed does that) shifts the physical Z
+        # endstop switch, so the nozzle triggers away from the homing
+        # reference and the position_endstop suggestion would repeat that
+        # shift on every run. Above this limit the suggestion is
+        # suppressed and the user is told to re-home. 0 disables it.
+        self.homing_deviation_limit = self._getfloat(
+            config, 'homing_deviation_limit', 0.1, minval=0.)
         self.speed = self._getfloat(config, 'speed', 50.0, above=0.)
         self.safe_z_height = self._getfloat(config, 'safe_z_height', None,
                                             above=0.)
@@ -706,6 +714,30 @@ class CalibrationRun:
         """Apply the newly calculated Z offset through Klipper."""
         self.gcode_offset.set_new_offset(offset)
 
+    def _warn_stale_homing(self, nozzle_zero, deviation):
+        """Report a Z homing reference the bed has moved away from."""
+        self.gcmd.respond_info(
+            "%s: WARNING: the Z homing reference is stale: the nozzle"
+            " triggered at Z=%.3f but the reference is %.3f, so the bed"
+            " moved by %.3f mm since the last Z homing (Z_TILT_ADJUST"
+            " does that). The position_endstop suggestion would be off"
+            " by the same amount and is suppressed. Home Z again (G28 Z)"
+            " and repeat the calibration."
+            % (self.gcmd.get_command(), nozzle_zero,
+               self.helper.position_z_endstop, abs(deviation)))
+
+    def _homing_deviation(self, nozzle_zero):
+        """Return how far the nozzle trigger sits from the Z homing reference.
+
+        After a fresh G28 Z the nozzle triggers the bed-mounted switch at
+        the reference itself, so this difference is the bed movement that
+        happened since that homing. None when no Z rail reference is known.
+        """
+        pos_z_estop = self.helper.position_z_endstop
+        if pos_z_estop is None:
+            return None
+        return nozzle_zero - pos_z_estop
+
     def _suggest_endstop_position(self, offset):
         """Suggest the config option that holds the Z homing reference."""
         pos_z_estop = self.helper.position_z_endstop
@@ -804,7 +836,14 @@ class CalibrationRun:
                                    % (self.gcmd.get_command(), probe_zero,
                                       switch_zero, nozzle_zero, switch_offset,
                                       offset))
-            if abs(offset) > 0.2:
+            # A stale homing reference makes the suggestion wrong by the
+            # same amount, so warn instead of suggesting a number that
+            # would move the nozzle further from the bed on every run.
+            deviation = self._homing_deviation(nozzle_zero)
+            limit = self.helper.homing_deviation_limit
+            if deviation is not None and limit and abs(deviation) > limit:
+                self._warn_stale_homing(nozzle_zero, deviation)
+            elif abs(offset) > 0.2:
                 self._suggest_endstop_position(offset)
             # check offset margins
             if (offset < self.offset_margins[0]
