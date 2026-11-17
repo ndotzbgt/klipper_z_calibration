@@ -162,10 +162,9 @@ link_kalico_extension()
 {
     echo -n "Linking extension to Kalico plugins... "
     ln -sf "${SRCDIR}/z_calibration.py" "$KALICO_PLUGIN_FILE"
+    ln -sf "${SRCDIR}/klipper_compat.py" "$KALICO_COMPAT_FILE"
     remove_repo_link "$KLIPPER_EXTRA_FILE" "${SRCDIR}/z_calibration.py"
     remove_repo_link "$KLIPPER_COMPAT_FILE" "${SRCDIR}/klipper_compat.py"
-    remove_repo_link "$KALICO_COMPAT_FILE" "${SRCDIR}/klipper_compat.py"
-    remove_file_if_present "${KLIPPER_PATH}/klippy/extras/klipper_compat.pyc"
     remove_file_if_present "${KALICO_PLUGIN_DIR}/klipper_compat.pyc"
     echo "[OK]"
     echo "Kalico users must enable:"
@@ -177,7 +176,7 @@ link_klipper_extension()
 {
     echo -n "Linking extension to Klipper extras... "
     ln -sf "${SRCDIR}/z_calibration.py" "$KLIPPER_EXTRA_FILE"
-    remove_repo_link "$KLIPPER_COMPAT_FILE" "${SRCDIR}/klipper_compat.py"
+    ln -sf "${SRCDIR}/klipper_compat.py" "$KLIPPER_COMPAT_FILE"
     remove_file_if_present "${KLIPPER_PATH}/klippy/extras/klipper_compat.pyc"
     echo "[OK]"
 }
