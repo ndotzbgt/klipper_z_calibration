@@ -67,6 +67,29 @@ def calibration_values(**overrides):
     return values
 
 
+def run_full_calibration(position_z_endstop=0.0, values=None):
+    """Run a complete CALIBRATE_Z and return the (helper, gcmd) pair.
+
+    The fake measurements trigger the nozzle at Z=1.0, so
+    position_z_endstop models the Z homing reference the last G28 Z left
+    behind: 1.0 is a fresh homing, 0.0 a stale one.
+    """
+    session = FakeProbeSession([
+        ProbeResult(30.0, 30.0, 123.0, 29.0, 28.0, 5.0),
+    ])
+    probe = FakeProbe(session=session, offsets=(1.0, 2.0, 1.5))
+    helper, printer = make_helper(
+        values if values is not None else calibration_values(), probe)
+    helper.position_z_endstop = position_z_endstop
+    printer.homing.results = [
+        [10.0, 10.0, 1.0],
+        [20.0, 20.0, 2.0],
+    ]
+    gcmd = FakeGcmd()
+    helper.cmd_CALIBRATE_Z(gcmd)
+    return helper, gcmd
+
+
 class ZCalibrationEndstopPinTest(unittest.TestCase):
     """Covers the plugin-owned calibration endstop on a configured pin."""
 
@@ -287,6 +310,78 @@ class ZCalibrationTest(unittest.TestCase):
                 with self.assertRaises(FakeError):
                     z_calibration.ZCalibrationHelper(config)
 
+    def test_homing_deviation_limit_defaults_to_the_stale_threshold(self):
+        # 0.1 mm separates a freshly homed machine (the bed moved at most
+        # a few hundredths of a millimetre) from a stale one.
+        helper, _printer = make_helper()
+        self.assertAlmostEqual(helper.homing_deviation_limit, 0.1)
+
+    def test_homing_deviation_limit_is_configurable_and_zero_disables(self):
+        for raw, expected in [('0.5', 0.5), ('0', 0.0)]:
+            with self.subTest(raw=raw):
+                helper, _printer = make_helper(
+                    {'homing_deviation_limit': raw})
+                self.assertAlmostEqual(helper.homing_deviation_limit,
+                                       expected)
+
+    def test_homing_deviation_limit_rejects_negative_values(self):
+        printer = FakePrinter()
+        config = FakeConfig(printer, {'homing_deviation_limit': '-0.1'})
+        with self.assertRaises(FakeError):
+            z_calibration.ZCalibrationHelper(config)
+
+    def test_calibration_suggests_when_homing_is_fresh(self):
+        # Fresh homing: nozzle_zero (1.0) equals position_z_endstop (1.0).
+        helper, gcmd = run_full_calibration(position_z_endstop=1.0)
+        suggestions = [r for r in gcmd.responses if 'suggested' in r]
+        self.assertEqual(len(suggestions), 1)
+
+    def test_calibration_warns_and_suppresses_when_homing_is_stale(self):
+        # Stale homing: nozzle_zero (1.0) differs from position_z_endstop (0.0)
+        # by 1.0 mm, which exceeds the default limit of 0.1.
+        helper, gcmd = run_full_calibration(position_z_endstop=0.0)
+        warnings = [r for r in gcmd.responses if 'WARNING' in r]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn('stale', warnings[0])
+        self.assertIn('suppressed', warnings[0])
+        suggestions = [r for r in gcmd.responses if 'suggested' in r]
+        self.assertEqual(len(suggestions), 0)
+
+    def test_calibration_limit_zero_disables_stale_check(self):
+        # homing_deviation_limit = 0 disables the check completely.
+        helper, gcmd = run_full_calibration(
+            position_z_endstop=0.0,
+            values=calibration_values(homing_deviation_limit='0'))
+        suggestions = [r for r in gcmd.responses if 'suggested' in r]
+        self.assertEqual(len(suggestions), 1)
+
+    def test_calibration_skips_stale_check_when_reference_unknown(self):
+        # position_z_endstop is None until the first homing event.
+        # Provide all probing settings via config so _require_probing_settings
+        # passes without latching from a rail.
+        session = FakeProbeSession([
+            ProbeResult(30.0, 30.0, 123.0, 29.0, 28.0, 5.0),
+        ])
+        probe = FakeProbe(session=session, offsets=(1.0, 2.0, 1.5))
+        values = calibration_values(position_min='-2.0')
+        printer = FakePrinter(probe)
+        config = FakeConfig(printer, values)
+        helper = z_calibration.ZCalibrationHelper(config)
+        helper.handle_connect()
+        # Do NOT call handle_home_rails_end -> position_z_endstop stays None.
+        printer.homing.results = [
+            [10.0, 10.0, 1.0],
+            [20.0, 20.0, 2.0],
+        ]
+        gcmd = FakeGcmd()
+        helper.cmd_CALIBRATE_Z(gcmd)
+        warnings = [r for r in gcmd.responses if 'WARNING' in r]
+        # When position_z_endstop is None, _homing_deviation returns None,
+        # so the stale check is skipped. No warning should be emitted.
+        self.assertEqual(len(warnings), 0)
+        suggestions = [r for r in gcmd.responses if 'suggested' in r]
+        self.assertEqual(len(suggestions), 0)
+
     def test_float_options_reject_non_finite_values(self):
         # Klipper's own bounds let 'inf' through: it is above every minimum,
         # so it would reach a probing speed, a safe Z height or the depth a
@@ -294,7 +389,7 @@ class ZCalibrationTest(unittest.TestCase):
         options = ['switch_offset', 'speed', 'safe_z_height',
                    'samples_tolerance', 'lift_speed', 'probing_speed',
                    'probing_second_speed', 'probing_retract_dist',
-                   'position_min']
+                   'position_min', 'homing_deviation_limit']
         for option in options:
             for raw in ['inf', '-inf', 'nan']:
                 with self.subTest(option=option, raw=raw):
@@ -1009,6 +1104,10 @@ class ZCalibrationTest(unittest.TestCase):
         helper, printer = make_helper(calibration_values(), probe)
         printer.objects['toolchanger'] = FakeToolchanger(
             FakeTool(0.0, 0.0, 0.3))
+        # Model a fresh homing: the nozzle triggers the switch at the Z
+        # homing reference itself, so no stale-homing warning is emitted
+        # and this test counts only the toolchanger warning.
+        helper.position_z_endstop = 1.0
         printer.homing.results = [
             [10.0, 10.0, 1.0],
             [20.0, 20.0, 2.0],
@@ -1042,6 +1141,9 @@ class ZCalibrationTest(unittest.TestCase):
                 probe = FakeProbe(session=session, offsets=(1.0, 2.0, 1.5))
                 helper, printer = make_helper(calibration_values(), probe)
                 printer.objects['toolchanger'] = toolchanger
+                # Fresh homing again: the nozzle trigger sits on the Z
+                # homing reference, so only a real warning would show up.
+                helper.position_z_endstop = 1.0
                 printer.homing.results = [
                     [10.0, 10.0, 1.0],
                     [20.0, 20.0, 2.0],
